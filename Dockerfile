@@ -151,4 +151,6 @@ WORKDIR /app
 
 EXPOSE 3000
 
+LABEL org.opencontainers.image.version="latest"
+
 CMD ["bundle", "exec", "rails", "s", "-p", "3000", "-b", "0.0.0.0"]
