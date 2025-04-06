@@ -1,26 +1,15 @@
-# pre-build stage
+# Etapa 1: Node base (para JS deps)
 FROM node:23-alpine as node
-FROM ruby:3.3.3-alpine3.19 AS pre-builder
 
-ARG NODE_VERSION="23.7.0"
-ARG PNPM_VERSION="10.2.0"
-ENV NODE_VERSION=${NODE_VERSION}
-ENV PNPM_VERSION=${PNPM_VERSION}
+# Etapa 2: Pre-build con Ruby y Node
+FROM ruby:3.3.3-alpine3.19 as pre-builder
 
-ARG BUNDLE_WITHOUT="development:test"
-ENV BUNDLE_WITHOUT ${BUNDLE_WITHOUT}
-ENV BUNDLER_VERSION=2.5.11
-
-ARG RAILS_SERVE_STATIC_FILES=true
-ENV RAILS_SERVE_STATIC_FILES ${RAILS_SERVE_STATIC_FILES}
-
-ARG RAILS_ENV=production
-ENV RAILS_ENV ${RAILS_ENV}
-
-ARG NODE_OPTIONS="--max-old-space-size=4096 --openssl-legacy-provider"
-ENV NODE_OPTIONS ${NODE_OPTIONS}
-
-ENV BUNDLE_PATH="/gems"
+ENV BUNDLER_VERSION=2.5.6
+ENV RAILS_ENV=production \
+    NODE_ENV=production \
+    INSTALLATION_ENV=docker \
+    LANG=C.UTF-8 \
+    RAILS_LOG_TO_STDOUT=true
 
 RUN apk update && apk add --no-cache \
   openssl \
@@ -32,80 +21,51 @@ RUN apk update && apk add --no-cache \
   git \
   curl \
   xz \
-  && mkdir -p /var/app \
-  && gem install bundler
-
-COPY --from=node /usr/local/bin/node /usr/local/bin/
-COPY --from=node /usr/local/lib/node_modules /usr/local/lib/node_modules
-RUN ln -s /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
-  && ln -s /usr/local/lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx
-
-RUN npm install -g pnpm@${PNPM_VERSION}
-
-RUN echo 'export PNPM_HOME="/root/.local/share/pnpm"' >> /root/.shrc \
-  && echo 'export PATH="$PNPM_HOME:$PATH"' >> /root/.shrc \
-  && export PNPM_HOME="/root/.local/share/pnpm" \
-  && export PATH="$PNPM_HOME:$PATH" \
-  && pnpm --version
-
-ENV PNPM_HOME="/root/.local/share/pnpm"
-ENV PATH="$PNPM_HOME:$PATH"
+  vips \
+  g++ \
+  libffi-dev \
+  linux-headers \
+  && mkdir -p /app \
+  && gem install bundler -v "$BUNDLER_VERSION"
 
 WORKDIR /app
 
+# Copia Node desde la etapa previa
+COPY --from=node /usr/local/bin/node /usr/local/bin/
+COPY --from=node /usr/local/lib/node_modules /usr/local/lib/node_modules
+
+# Vincula npm/npx
+RUN ln -s /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
+  && ln -s /usr/local/lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx \
+  && npm install -g pnpm@10.2.0
+
+# Bundle install
 COPY Gemfile Gemfile.lock ./
-
-RUN apk update && apk add --no-cache build-base musl ruby-full ruby-dev gcc make musl-dev openssl openssl-dev g++ linux-headers xz vips
 RUN bundle config set --local force_ruby_platform true
+RUN bundle config set without 'development test'
+RUN bundle install -j4
 
-RUN if [ "$RAILS_ENV" = "production" ]; then \
-  bundle config set without 'development test'; bundle install -j 4 -r 3; \
-  else bundle install -j 4 -r 3; \
-  fi
-
+# Instalar dependencias JS
 COPY package.json pnpm-lock.yaml ./
-RUN pnpm i
+RUN pnpm install
 
-COPY . /app
+# Copiar el resto del código
+COPY . .
 
+# Preparar assets
 RUN mkdir -p /app/log
+RUN SECRET_KEY_BASE=precompile_placeholder bundle exec rake assets:precompile
 
-RUN if [ "$RAILS_ENV" = "production" ]; then \
-  SECRET_KEY_BASE=precompile_placeholder RAILS_LOG_TO_STDOUT=enabled bundle exec rake assets:precompile \
-  && rm -rf spec node_modules tmp/cache; \
-  fi
+# Etapa final
+FROM ruby:3.3.3-alpine3.19 as final
 
-RUN git rev-parse HEAD > /app/.git_sha
-
-RUN rm -rf /gems/ruby/3.3.0/cache/*.gem \
-  && find /gems/ruby/3.3.0/gems/ \( -name "*.c" -o -name "*.o" \) -delete \
-  && rm -rf .git \
-  && rm .gitignore
-
-# final build stage
-FROM ruby:3.3.3-alpine3.19
-
-ARG NODE_VERSION="23.7.0"
-ARG PNPM_VERSION="10.2.0"
-ENV NODE_VERSION=${NODE_VERSION}
-ENV PNPM_VERSION=${PNPM_VERSION}
-
-ARG BUNDLE_WITHOUT="development:test"
-ENV BUNDLE_WITHOUT ${BUNDLE_WITHOUT}
-ENV BUNDLER_VERSION=2.5.11
-
-ARG EXECJS_RUNTIME="Disabled"
-ENV EXECJS_RUNTIME ${EXECJS_RUNTIME}
-
-ARG RAILS_SERVE_STATIC_FILES=true
-ENV RAILS_SERVE_STATIC_FILES ${RAILS_SERVE_STATIC_FILES}
-
-ARG BUNDLE_FORCE_RUBY_PLATFORM=1
-ENV BUNDLE_FORCE_RUBY_PLATFORM ${BUNDLE_FORCE_RUBY_PLATFORM}
-
-ARG RAILS_ENV=production
-ENV RAILS_ENV ${RAILS_ENV}
-ENV BUNDLE_PATH="/gems"
+ENV BUNDLER_VERSION=2.5.6
+ENV RAILS_ENV=production \
+    NODE_ENV=production \
+    INSTALLATION_ENV=docker \
+    LANG=C.UTF-8 \
+    RAILS_LOG_TO_STDOUT=true \
+    RAILS_SERVE_STATIC_FILES=true
 
 RUN apk update && apk add --no-cache \
   build-base \
@@ -115,24 +75,16 @@ RUN apk update && apk add --no-cache \
   imagemagick \
   git \
   vips \
-  && gem install bundler
-
-COPY --from=node /usr/local/bin/node /usr/local/bin/
-COPY --from=node /usr/local/lib/node_modules /usr/local/lib/node_modules
-
-RUN ln -s /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
-  && ln -s /usr/local/lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx \
-  && npm install -g pnpm@${PNPM_VERSION} \
-  && pnpm --version
-
-COPY --from=pre-builder /gems/ /gems/
-COPY --from=pre-builder /app /app
-COPY --from=pre-builder /app/.git_sha /app/.git_sha
+  && gem install bundler -v "$BUNDLER_VERSION"
 
 WORKDIR /app
 
-LABEL org.opencontainers.image.version="latest"
+# Copia todo desde la preconstrucción
+COPY --from=pre-builder /app /app
+COPY --from=pre-builder /usr/local/lib/ruby /usr/local/lib/ruby
+COPY --from=pre-builder /usr/local/bundle /usr/local/bundle
 
 EXPOSE 3000
 
-CMD ["bundle", "exec", "rails", "s", "-p", "3000", "-b", "0.0.0.0"]
+CMD ["bash", "-c", "bundle exec rails db:prepare && bundle exec puma -C config/puma.rb"]
+
